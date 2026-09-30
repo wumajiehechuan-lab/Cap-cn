@@ -4,3 +4,11 @@ packages:
   - "crates/tauri-plugin-*"
   - "infra"
   - "scripts/orgIdBackfill"
+
+onlyBuiltDependencies:
+  - "@parcel/watcher"
+  - "@swc/core"
+  - "esbuild"
+  - "ffmpeg-static"
+  - "sharp"
+  - "unrs-resolver"

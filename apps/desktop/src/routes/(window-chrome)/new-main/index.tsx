@@ -404,11 +404,8 @@ function createUpdateCheck() {
 			const result = await updater.check();
 			if (result) update = result;
 		} catch (e) {
+			// 本地自编译版本未配置更新源（endpoints/pubkey 为空），检查失败属正常情况，静默忽略即可
 			console.error("Failed to check for updates:", e);
-			await dialog.message(
-				"Unable to check for updates. Please download the latest version manually from cap.so/download. Your data will not be lost.\n\nIf this issue persists, please contact support.",
-				{ title: "Update Error", kind: "error" },
-			);
 			return;
 		}
 

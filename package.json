@@ -49,5 +49,15 @@
 	"name": "cap",
 	"engines": {
 		"node": ">=20"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"@parcel/watcher",
+			"@swc/core",
+			"esbuild",
+			"ffmpeg-static",
+			"sharp",
+			"unrs-resolver"
+		]
 	}
 }
