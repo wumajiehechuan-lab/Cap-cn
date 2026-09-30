@@ -15,6 +15,9 @@ use crate::video::h264::{
 
 const INIT_SEGMENT_NAME: &str = "init.mp4";
 
+/// FFmpeg DASH muxer 写 MPD 时使用的临时文件名（写完由 muxer 自行改名）
+const DASH_MANIFEST_TMP_FILE: &str = "dash_manifest.mpd.tmp";
+
 #[derive(Debug, Clone)]
 pub struct DiskSpaceWarning {
     pub available_mb: u64,
@@ -442,8 +445,11 @@ impl SegmentedVideoEncoder {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("segment_")
-                    && name.ends_with(".m4s.tmp")
+                // FFmpeg 的 DASH muxer 写 MPD 时同样是「先写 .tmp 再改名」，
+                // 在 Windows 上目标文件被占用会导致改名失败，把内容留在 .tmp 里。
+                // 这里和分段文件走同一套重命名重试逻辑。
+                if (name.starts_with("segment_") && name.ends_with(".m4s.tmp"))
+                    || name == DASH_MANIFEST_TMP_FILE
                 {
                     if let Ok(metadata) = std::fs::metadata(&path) {
                         if metadata.len() > 0 {

@@ -230,6 +230,12 @@ impl H264EncoderBuilder {
             );
         }
 
+        let conversion_flags = if needs_scaling {
+            ffmpeg::software::scaling::flag::Flags::BICUBIC
+        } else {
+            ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR
+        };
+
         let converter = if external_conversion {
             debug!(
                 output_format = ?output_format,
@@ -239,11 +245,7 @@ impl H264EncoderBuilder {
             );
             None
         } else if needs_pixel_conversion || needs_scaling {
-            let flags = if needs_scaling {
-                ffmpeg::software::scaling::flag::Flags::BICUBIC
-            } else {
-                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR
-            };
+            let flags = conversion_flags;
 
             match ffmpeg::software::scaling::Context::get(
                 input_config.pixel_format,
@@ -347,6 +349,8 @@ impl H264EncoderBuilder {
             input_format: input_config.pixel_format,
             input_width: input_config.width,
             input_height: input_config.height,
+            conversion_flags,
+            input_mismatch_logged: false,
             converted_frame_pool,
         })
     }
@@ -362,6 +366,8 @@ pub struct H264Encoder {
     input_format: format::Pixel,
     input_width: u32,
     input_height: u32,
+    conversion_flags: ffmpeg::software::scaling::flag::Flags,
+    input_mismatch_logged: bool,
     converted_frame_pool: Option<frame::Video>,
 }
 
@@ -405,6 +411,75 @@ impl H264Encoder {
         }
     }
 
+    /// 用内部软件转换器转换一帧。
+    ///
+    /// 采集侧声明的 `VideoInfo` 与实际帧参数不一致时（例如裁剪盒尺寸与声明宽高
+    /// 相差 1 像素），`ffmpeg-next` 会返回 `InputChanged`。此时按帧的真实参数
+    /// 重建转换器并重试一次，避免整段录像因为尺寸偏差而丢掉所有帧。
+    fn convert_frame(
+        &mut self,
+        frame: &frame::Video,
+        converted: &mut frame::Video,
+    ) -> Result<(), QueueFrameError> {
+        if self.converter.is_none() {
+            return Ok(());
+        }
+
+        let output_format = self.output_format;
+        let output_width = self.output_width;
+        let output_height = self.output_height;
+        let flags = self.conversion_flags;
+
+        let result = self
+            .converter
+            .as_mut()
+            .expect("converter checked above")
+            .run(frame, converted)
+            .map_err(QueueFrameError::Converter);
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(QueueFrameError::Converter(ffmpeg::Error::InputChanged)) => {
+                if !self.input_mismatch_logged {
+                    self.input_mismatch_logged = true;
+                    warn!(
+                        actual_format = ?frame.format(),
+                        actual_width = frame.width(),
+                        actual_height = frame.height(),
+                        declared_format = ?self.input_format,
+                        declared_width = self.input_width,
+                        declared_height = self.input_height,
+                        "Capture frame does not match declared video info, rebuilding scaler with actual parameters"
+                    );
+                }
+
+                self.input_format = frame.format();
+                self.input_width = frame.width();
+                self.input_height = frame.height();
+
+                self.converter = Some(
+                    ffmpeg::software::scaling::Context::get(
+                        self.input_format,
+                        self.input_width,
+                        self.input_height,
+                        output_format,
+                        output_width,
+                        output_height,
+                        flags,
+                    )
+                    .map_err(QueueFrameError::Converter)?,
+                );
+
+                self.converter
+                    .as_mut()
+                    .expect("converter just rebuilt")
+                    .run(frame, converted)
+                    .map_err(QueueFrameError::Converter)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn queue_frame(
         &mut self,
         mut frame: frame::Video,
@@ -414,14 +489,17 @@ impl H264Encoder {
         self.base
             .update_pts(&mut frame, timestamp, &mut self.encoder);
 
-        let frame_to_send = if let Some(converter) = &mut self.converter {
+        let frame_to_send = if self.converter.is_some() {
             let pts = frame.pts();
-            let converted = self.converted_frame_pool.as_mut().unwrap();
-            converter
-                .run(&frame, converted)
-                .map_err(QueueFrameError::Converter)?;
+            let mut converted = self
+                .converted_frame_pool
+                .take()
+                .expect("converted frame pool missing");
+            let result = self.convert_frame(&frame, &mut converted);
             converted.set_pts(pts);
-            converted as &frame::Video
+            self.converted_frame_pool = Some(converted);
+            result?;
+            self.converted_frame_pool.as_ref().unwrap()
         } else {
             &frame
         };
@@ -442,14 +520,12 @@ impl H264Encoder {
     ) -> Result<(), QueueFrameError> {
         self.base.update_pts(frame, timestamp, &mut self.encoder);
 
-        let frame_to_send = if let Some(converter) = &mut self.converter {
+        let frame_to_send = if self.converter.is_some() {
             let pts = frame.pts();
             let converted = converted_frame.get_or_insert_with(|| {
                 frame::Video::new(self.output_format, self.output_width, self.output_height)
             });
-            converter
-                .run(frame, converted)
-                .map_err(QueueFrameError::Converter)?;
+            self.convert_frame(frame, converted)?;
             converted.set_pts(pts);
             converted as &frame::Video
         } else {

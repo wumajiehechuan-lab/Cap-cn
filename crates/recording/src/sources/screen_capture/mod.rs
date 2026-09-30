@@ -321,7 +321,12 @@ impl<TCaptureFormat: ScreenCaptureFormat> ScreenCaptureConfig<TCaptureFormat> {
 
             #[cfg(target_os = "windows")]
             {
-                crop_bounds.map(|b| b.size().map(|v| (v / 2.0).floor() * 2.0))
+                // 必须与采集侧实际使用的 D3D11 裁剪盒尺寸完全一致，
+                // 否则采集帧宽高会与这里声明的 VideoInfo 不符
+                crop_bounds.map(|b| {
+                    let (_, width, height) = windows::crop_box_for_bounds(b);
+                    PhysicalSize::new(width as f64, height as f64)
+                })
             }
         }
         .or_else(|| display.physical_size())

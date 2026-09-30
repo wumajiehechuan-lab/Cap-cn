@@ -2197,7 +2197,9 @@ pub fn remux_fragmented_recording(recording_dir: &Path) -> Result<(), String> {
         info!("Successfully remuxed fragmented recording");
         Ok(())
     } else {
-        Err("Could not find fragments to remux".to_string())
+        // 目录存在但探测不到任何可解码片段，说明采集阶段没有产出画面，
+        // 而不是重组环节出了问题——这里直接说清楚，避免误导到 remux 方向
+        Err("No decodable video fragments found: the recording captured no picture".to_string())
     }
 }
 
@@ -2205,7 +2207,7 @@ fn analyze_recording_for_remux(
     project_path: &Path,
     meta: &RecordingMeta,
 ) -> Option<cap_recording::recovery::IncompleteRecording> {
-    use cap_recording::recovery::{IncompleteRecording, RecoverableSegment};
+    use cap_recording::recovery::{IncompleteRecording, RecoveryManager, RecoverableSegment};
 
     let StudioRecordingMeta::MultipleSegments { inner, .. } = meta.studio_meta()? else {
         return None;
@@ -2216,7 +2218,7 @@ fn analyze_recording_for_remux(
     for (index, segment) in inner.segments.iter().enumerate() {
         let display_path = segment.display.path.to_path(project_path);
         let (display_fragments, display_init_segment) = if display_path.is_dir() {
-            let frags = find_fragments_in_dir(&display_path);
+            let frags = RecoveryManager::probe_fragments_in_dir(&display_path);
             let init = display_path.join("init.mp4");
             (frags, if init.exists() { Some(init) } else { None })
         } else if display_path.exists() {
@@ -2235,7 +2237,7 @@ fn analyze_recording_for_remux(
             .map(|cam| {
                 let cam_path = cam.path.to_path(project_path);
                 if cam_path.is_dir() {
-                    let frags = find_fragments_in_dir(&cam_path);
+                    let frags = RecoveryManager::probe_fragments_in_dir(&cam_path);
                     let init = cam_path.join("init.mp4");
                     let init_seg = if init.exists() { Some(init) } else { None };
                     if frags.is_empty() {
@@ -2260,7 +2262,7 @@ fn analyze_recording_for_remux(
         let mic_fragments = segment.mic.as_ref().and_then(|mic| {
             let mic_path = mic.path.to_path(project_path);
             if mic_path.is_dir() {
-                let frags = find_fragments_in_dir(&mic_path);
+                let frags = RecoveryManager::probe_fragments_in_dir(&mic_path);
                 if frags.is_empty() { None } else { Some(frags) }
             } else if mic_path.exists() {
                 Some(vec![mic_path])
@@ -2272,7 +2274,7 @@ fn analyze_recording_for_remux(
         let system_audio_fragments = segment.system_audio.as_ref().and_then(|sys| {
             let sys_path = sys.path.to_path(project_path);
             if sys_path.is_dir() {
-                let frags = find_fragments_in_dir(&sys_path);
+                let frags = RecoveryManager::probe_fragments_in_dir(&sys_path);
                 if frags.is_empty() { None } else { Some(frags) }
             } else if sys_path.exists() {
                 Some(vec![sys_path])
@@ -2303,21 +2305,6 @@ fn analyze_recording_for_remux(
         recoverable_segments,
         estimated_duration: Duration::ZERO,
     })
-}
-
-fn find_fragments_in_dir(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let mut fragments: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "mp4" || e == "m4a"))
-        .collect();
-
-    fragments.sort();
-    fragments
 }
 
 #[cfg(test)]

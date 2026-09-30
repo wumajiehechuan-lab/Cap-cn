@@ -1,6 +1,6 @@
 use crate::{
     AudioFrame, SetupCtx, output_pipeline,
-    screen_capture::{ScreenCaptureConfig, ScreenCaptureFormat},
+    screen_capture::{CropBounds, ScreenCaptureConfig, ScreenCaptureFormat},
 };
 use ::windows::Win32::Graphics::Direct3D11::{D3D11_BOX, ID3D11Device};
 use anyhow::anyhow;
@@ -64,25 +64,71 @@ impl output_pipeline::VideoFrame for VideoFrame {
     }
 }
 
+/// 计算采集用 D3D11 裁剪盒，并返回与之严格一致的输出宽高。
+///
+/// 裁剪盒的宽高必须与 `VideoInfo` 中声明的宽高完全一致：D3D11 帧的宽高取自
+/// `crop.right - crop.left`，而编码器 sws 转换器在创建时记录的是声明值，
+/// 两者只要相差 1 像素，`ffmpeg-next` 的前置校验就会判定 `InputChanged`，
+/// 导致整段录像的每一帧都被丢弃。
+///
+/// 因此这里统一以 `left/top` 为基准推导 `right/bottom`（而不是各自独立取整），
+/// 保证 `right - left` 恒等于取偶后的宽度。窗口坐标为负数（最大化窗口的 DWM
+/// 扩展边框）或宽高为奇数时都不会再出现偏差。
+pub fn crop_box_for_bounds(bounds: CropBounds) -> (D3D11_BOX, u32, u32) {
+    let position = bounds.position();
+    let size = bounds.size();
+
+    let width = even_dimension(size.width());
+    let height = even_dimension(size.height());
+
+    // 负坐标会被 `as u32` 饱和截断为 0，这里显式取 max 以表明意图
+    let left = position.x().max(0.0) as u32;
+    let top = position.y().max(0.0) as u32;
+
+    (
+        D3D11_BOX {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+            front: 0,
+            back: 1,
+        },
+        width,
+        height,
+    )
+}
+
+/// 向下取到偶数，与 `VideoInfo` 声明尺寸使用同一套规则。
+fn even_dimension(value: f64) -> u32 {
+    ((value / 2.0).floor() * 2.0).max(0.0) as u32
+}
+
 impl ScreenCaptureConfig<Direct3DCapture> {
     pub async fn to_sources(
         &self,
     ) -> anyhow::Result<(VideoSourceConfig, Option<SystemAudioSourceConfig>)> {
+        let crop = self.config.crop_bounds.map(|bounds| {
+            let (crop, width, height) = crop_box_for_bounds(bounds);
+
+            info!(
+                left = crop.left,
+                top = crop.top,
+                right = crop.right,
+                bottom = crop.bottom,
+                width,
+                height,
+                declared_width = self.video_info.width,
+                declared_height = self.video_info.height,
+                "Computed D3D11 crop box for screen capture"
+            );
+
+            crop
+        });
+
         let mut settings = scap_direct3d::Settings {
             pixel_format: Direct3DCapture::PIXEL_FORMAT,
-            crop: self.config.crop_bounds.map(|b| {
-                let position = b.position();
-                let size = b.size().map(|v| (v / 2.0).floor() * 2.0);
-
-                D3D11_BOX {
-                    left: position.x() as u32,
-                    top: position.y() as u32,
-                    right: (position.x() + size.width()) as u32,
-                    bottom: (position.y() + size.height()) as u32,
-                    front: 0,
-                    back: 1,
-                }
-            }),
+            crop,
             ..Default::default()
         };
 

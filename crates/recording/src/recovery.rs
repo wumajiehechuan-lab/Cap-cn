@@ -370,7 +370,12 @@ impl RecoveryManager {
             .unwrap_or(false)
     }
 
-    fn probe_fragments_in_dir(dir: &Path) -> Vec<PathBuf> {
+    /// 探测目录中真正可用的媒体片段。
+    ///
+    /// 注意 `init.mp4` 虽然扩展名是 mp4，但它是 DASH 的初始化段而非媒体片段，
+    /// 这里靠「能否解出帧」把它排除掉。对外暴露是为了让桌面端复用同一套判定，
+    /// 避免出现两份实现各自漂移。
+    pub fn probe_fragments_in_dir(dir: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
